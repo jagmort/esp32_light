@@ -1,4 +1,4 @@
-# Light
+# Light and Sensors
 
 This example creates a Color Temperature Light device using the ESP
 Matter data model.
