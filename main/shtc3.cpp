@@ -58,29 +58,50 @@ static esp_err_t shtc3_init_i2c()
 static esp_err_t shtc3_read(uint8_t *data, size_t size)
 {
     i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+    if (cmd == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
     i2c_master_start(cmd);
     i2c_master_write_byte(cmd, (SHTC3_SENSOR_ADDR << 1) | I2C_MASTER_WRITE, true /* enable_ack */);
     // Read temperature first then humidity, with clock stretching enabled
     i2c_master_write_byte(cmd, 0x7C, true /* enable_ack */);
     i2c_master_write_byte(cmd, 0xA2, true /* enable_ack */);
     i2c_master_stop(cmd);
-    i2c_master_cmd_begin(I2C_MASTER_NUM, cmd, pdMS_TO_TICKS(1000));
+    esp_err_t err = i2c_master_cmd_begin(I2C_MASTER_NUM, cmd, pdMS_TO_TICKS(1000));
     i2c_cmd_link_delete(cmd);
-    cmd = NULL;
+    if (err != ESP_OK) {
+        return err;
+    }
 
     // Wait for measurement to complete
     vTaskDelay(pdMS_TO_TICKS(15));
 
     cmd = i2c_cmd_link_create();
+    if (cmd == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
     i2c_master_start(cmd);
     i2c_master_write_byte(cmd, (SHTC3_SENSOR_ADDR << 1) | I2C_MASTER_READ, true /* enable_ack */);
     i2c_master_read(cmd, data, size, I2C_MASTER_LAST_NACK);
     i2c_master_stop(cmd);
-    i2c_master_cmd_begin(I2C_MASTER_NUM, cmd, pdMS_TO_TICKS(1000));
+    err = i2c_master_cmd_begin(I2C_MASTER_NUM, cmd, pdMS_TO_TICKS(1000));
     i2c_cmd_link_delete(cmd);
-    cmd = NULL;
 
-    return ESP_OK;
+    return err;
+}
+
+static uint8_t shtc3_crc(const uint8_t *data, size_t size)
+{
+    uint8_t crc = 0xFF;
+
+    for (size_t i = 0; i < size; ++i) {
+        crc ^= data[i];
+        for (uint8_t bit = 0; bit < 8; ++bit) {
+            crc = (crc & 0x80) ? static_cast<uint8_t>((crc << 1) ^ 0x31) : static_cast<uint8_t>(crc << 1);
+        }
+    }
+
+    return crc;
 }
 
 // Temperature in degree Celsius
@@ -104,6 +125,9 @@ static esp_err_t shtc3_get_read_temp_and_humidity(float  &temp, float  &humidity
     if (err != ESP_OK) {
         return err;
     }
+    if (shtc3_crc(data, 2) != data[2] || shtc3_crc(data + 3, 2) != data[5]) {
+        return ESP_ERR_INVALID_CRC;
+    }
 
     uint16_t raw_temp = (data[0] << 8) | data[1];
     uint16_t raw_humidity = (data[3] << 8) | data[4];
@@ -124,6 +148,7 @@ static void timer_cb_internal(void *arg)
     float temp, humidity;
     esp_err_t err = shtc3_get_read_temp_and_humidity(temp, humidity);
     if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to read SHTC3, err:%s", esp_err_to_name(err));
         return;
     }
     if (ctx->config->temperature.cb) {
